@@ -143,6 +143,223 @@ function loadWalletsFromFile() {
   }
 }
 
+// Function to get a private key from a mnemonic
+function getPrivateKeyFromMnemonic(mnemonic) {
+  try {
+    const seed = bip39.mnemonicToEntropy(mnemonic);
+    
+    // Derive private key from the seed
+    const rootKey = CardanoWasm.Bip32PrivateKey.from_bip39_entropy(
+      Buffer.from(seed, 'hex'),
+      Buffer.from('') // No password
+    );
+    
+    // Derive account key (path: m/1852'/1815'/0')
+    const accountKey = rootKey
+      .derive(1852 + 0x80000000) // purpose: 1852'
+      .derive(1815 + 0x80000000) // coin type: 1815' (ADA)
+      .derive(0 + 0x80000000);   // account: 0'
+    
+    return accountKey;
+  } catch (error) {
+    console.error('Error getting private key from mnemonic:', error);
+    throw error;
+  }
+}
+
+// Function to send ADA from one wallet to another
+async function sendAda(senderWallet, receiverAddress, amountAda) {
+  try {
+    console.log(`\n💸 Attempting to send ${amountAda} ADA from ${senderWallet.name} to address ${receiverAddress}`);
+    
+    // Get sender's private key from mnemonic
+    const accountKey = getPrivateKeyFromMnemonic(senderWallet.mnemonic);
+    
+    // Derive spending key
+    const spendingKey = accountKey
+      .derive(0) // role: 0 (external addresses)
+      .derive(0) // index: 0 (first address)
+      .to_public();
+    
+    // Get the stake key
+    const stakeKey = accountKey
+      .derive(2) // role: 2 (staking key)
+      .derive(0) // index: 0
+      .to_public();
+    
+    // Convert ADA to lovelace
+    const amountLovelace = Math.floor(amountAda * 1000000);
+    
+    // Fee buffer in lovelace (minimum fee + buffer)
+    const feeBuffer = 200000; // 0.2 ADA
+    
+    // Get UTXOs for the sender's address
+    const utxos = await blockfrostAPI.addressesUtxos(senderWallet.address);
+    
+    if (!utxos || utxos.length === 0) {
+      console.log(`❌ No UTXOs found for address ${senderWallet.address}`);
+      return false;
+    }
+    
+    // Create transaction inputs
+    const txInputs = CardanoWasm.TransactionInputs.new();
+    let totalInputAmount = 0;
+    
+    for (const utxo of utxos) {
+      const txInput = CardanoWasm.TransactionInput.new(
+        CardanoWasm.TransactionHash.from_bytes(
+          Buffer.from(utxo.tx_hash, 'hex')
+        ),
+        utxo.output_index
+      );
+      
+      txInputs.add(txInput);
+      
+      // Add up input values (lovelace)
+      const lovelace = utxo.amount.find(a => a.unit === 'lovelace')?.quantity || '0';
+      totalInputAmount += parseInt(lovelace);
+      
+      // Break if we have enough inputs for our transaction
+      if (totalInputAmount >= amountLovelace + feeBuffer) {
+        break;
+      }
+    }
+    
+    if (totalInputAmount < amountLovelace + feeBuffer) {
+      console.log(`❌ Not enough funds. Required: ${(amountLovelace + feeBuffer)/1000000} ADA, Available: ${totalInputAmount/1000000} ADA`);
+      return false;
+    }
+    
+    // Create transaction outputs
+    const txOutputs = CardanoWasm.TransactionOutputs.new();
+    
+    // Output to recipient
+    const recipientAddress = CardanoWasm.Address.from_bech32(receiverAddress);
+    const recipientOutput = CardanoWasm.TransactionOutput.new(
+      recipientAddress,
+      CardanoWasm.Value.new(CardanoWasm.BigNum.from_str(amountLovelace.toString()))
+    );
+    txOutputs.add(recipientOutput);
+    
+    // Calculate change amount (sending back to sender)
+    const changeAmount = totalInputAmount - amountLovelace - feeBuffer;
+    
+    if (changeAmount > 0) {
+      const senderAddress = CardanoWasm.Address.from_bech32(senderWallet.address);
+      const changeOutput = CardanoWasm.TransactionOutput.new(
+        senderAddress,
+        CardanoWasm.Value.new(CardanoWasm.BigNum.from_str(changeAmount.toString()))
+      );
+      txOutputs.add(changeOutput);
+    }
+    
+    // Get latest protocol parameters
+    const latestBlock = await blockfrostAPI.blocksLatest();
+    const latestSlot = latestBlock.slot;
+    const protocolParams = await blockfrostAPI.epochsParameters(latestBlock.epoch);
+    
+    // Create transaction body
+    const txBody = CardanoWasm.TransactionBody.new(
+      txInputs,
+      txOutputs,
+      CardanoWasm.BigNum.from_str(feeBuffer.toString()),
+      latestSlot + 10000 // TTL: current slot + 10000 slots
+    );
+    
+    // Create witnesses
+    const witnesses = CardanoWasm.TransactionWitnessSet.new();
+    
+    // Add spending key witness
+    const vkeyWitnesses = CardanoWasm.Vkeywitnesses.new();
+    const txBodyHash = CardanoWasm.hash_transaction(txBody);
+    
+    const spendingPrivateKey = accountKey
+      .derive(0) // role: 0 (external)
+      .derive(0); // index: 0
+    
+    const vkeyWitness = CardanoWasm.make_vkey_witness(txBodyHash, spendingPrivateKey.to_raw_key());
+    vkeyWitnesses.add(vkeyWitness);
+    witnesses.set_vkeys(vkeyWitnesses);
+    
+    // Create signed transaction
+    const transaction = CardanoWasm.Transaction.new(
+      txBody,
+      witnesses,
+      undefined // No metadata
+    );
+    
+    // Serialize transaction to CBOR bytes
+    const txBytes = transaction.to_bytes();
+    const txHex = Buffer.from(txBytes).toString('hex');
+    
+    // Submit transaction
+    console.log(`Submitting transaction...`);
+    const submittedTxHash = await blockfrostAPI.txSubmit(Buffer.from(txBytes));
+    
+    console.log(`✅ Transaction submitted successfully!`);
+    console.log(`Transaction hash: ${submittedTxHash}`);
+    
+    return true;
+  } catch (error) {
+    console.error('Error sending ADA:', error);
+    return false;
+  }
+}
+
+// Function to check balances and transfer 1 ADA if one wallet has more funds
+async function balanceCheckAndTransfer(wallets) {
+  try {
+    if (!wallets || wallets.length < 2) {
+      console.log('Need at least 2 wallets to check balances');
+      return false;
+    }
+    
+    // Get balances for each wallet
+    const walletsWithBalance = [];
+    
+    for (const wallet of wallets) {
+      const balance = await fetchBalance(wallet.address);
+      
+      walletsWithBalance.push({
+        ...wallet,
+        balance: {
+          ada: parseFloat(balance.ada),
+          lovelace: balance.lovelace
+        }
+      });
+    }
+    
+    // Sort wallets by balance (descending)
+    walletsWithBalance.sort((a, b) => b.balance.ada - a.balance.ada);
+    
+    // Check if the first wallet has more balance than the second
+    if (walletsWithBalance[0].balance.ada > walletsWithBalance[1].balance.ada) {
+      console.log(`\n💹 ${walletsWithBalance[0].name} has more ADA (${walletsWithBalance[0].balance.ada}) than ${walletsWithBalance[1].name} (${walletsWithBalance[1].balance.ada})`);
+      
+      // Send 1 ADA from wallet with more balance to wallet with less balance
+      const success = await sendAda(
+        walletsWithBalance[0],
+        walletsWithBalance[1].address,
+        1.0 // 1 ADA
+      );
+      
+      if (success) {
+        console.log(`\n✅ Successfully sent 1 ADA from ${walletsWithBalance[0].name} to ${walletsWithBalance[1].name}`);
+      } else {
+        console.log(`\n❌ Failed to send 1 ADA from ${walletsWithBalance[0].name} to ${walletsWithBalance[1].name}`);
+      }
+      
+      return success;
+    } else {
+      console.log(`\n🔄 No transfer needed. ${walletsWithBalance[0].name} (${walletsWithBalance[0].balance.ada} ADA) does not have more than ${walletsWithBalance[1].name} (${walletsWithBalance[1].balance.ada} ADA)`);
+      return false;
+    }
+  } catch (error) {
+    console.error('Error checking balances and transferring:', error);
+    return false;
+  }
+}
+
 // Main function to create or load wallets and check balances
 async function manageWallets() {
   console.log(`\n🔍 Checking if wallet file exists...`);
@@ -162,6 +379,9 @@ async function manageWallets() {
       const balance = await fetchBalance(wallet.address);
       console.log(`💰 Balance: ${balance.ada} ADA (${balance.lovelace} lovelace)`);
     }
+    
+    // Check balances and transfer if needed
+    await balanceCheckAndTransfer(existingWallets);
   } else {
     console.log(`❌ No existing wallets found. Creating 2 new wallets...`);
     
@@ -181,8 +401,10 @@ async function manageWallets() {
       console.log(`🔑 Seed Phrase (KEEP SECURE):\n${wallet.mnemonic}`);
       console.log(`💰 Balance: 0 ADA (new wallet)`);
     }
+    
+    console.log(`\n⚠️ New wallets created. Fund them first before attempting transfers.`);
   }
 }
 
 // Export the main function
-export { manageWallets }; 
+export { manageWallets };
