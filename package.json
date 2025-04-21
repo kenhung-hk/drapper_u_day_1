@@ -1,0 +1,17 @@
+{
+  "name": "cardano-wallet-generator",
+  "version": "1.0.0",
+  "description": "Generate Cardano wallets and seed phrases using Blockfrost and Lucid",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "bip39": "^3.1.0",
+    "dotenv": "^16.3.1",
+    "@emurgo/cardano-serialization-lib-nodejs": "^11.5.0",
+    "@blockfrost/blockfrost-js": "^5.4.0",
+    "node-fetch": "^3.3.2"
+  }
+}
