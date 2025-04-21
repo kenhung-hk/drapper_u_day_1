@@ -1,0 +1,14 @@
+[
+  {
+    "name": "Wallet 1",
+    "address": "addr_test1qqlvew2r497g54vus2mjc5pegkq76usy3h7w9lwva5m5uvsqr9gt00k5z8nj8qxrj4cm5sk8jus4pk0tqlptlmqduuvsmyy4gs",
+    "mnemonic": "gain distance notice picnic chimney best neck segment lunch balcony shock balcony season summer identify cheese matrix object drama antenna swing culture salmon spare",
+    "type": "Testnet Address"
+  },
+  {
+    "name": "Wallet 2",
+    "address": "addr_test1qphfc98tmv6ckkhq5k7vvppd2tx5u5959898pfwdn55ndl8mfp65acx5r5v4sqy3rrvltu6pam2kn4kflrv6ktkcdhdqpvt9pq",
+    "mnemonic": "sunset man sadness level such stool tower pioneer good deposit have security health before pudding expect blame flip coral animal head amused casual upon",
+    "type": "Testnet Address"
+  }
+]
